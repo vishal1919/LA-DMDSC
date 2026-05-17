@@ -12,8 +12,8 @@ import os
 
 medmnist_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'datasets/MedMNIST')
 sys.path.insert(0, medmnist_path)
-from medmnist.dataset import BloodMNIST, OCTMNIST, DermaMNIST
-from medmnist import BloodMNIST, OCTMNIST, DermaMNIST
+from medmnist.dataset import BloodMNIST, DermaMNIST
+from medmnist import BloodMNIST, DermaMNIST
 
 class Random300K_Images(torch.utils.data.Dataset):
     def __init__(self, file_path='./data', transform=None, extendable=0):
@@ -47,44 +47,6 @@ class Random300K_Images(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data)
 
-class DTD_OE(torch.utils.data.Dataset):
-    """Outlier exposure wrapper for Describable Textures Dataset (DTD)"""
-    def __init__(self, root='./data', transform=None, download=True):
-        import torchvision
-        self.dataset = torchvision.datasets.DTD(root=root, split='train', transform=transform, download=download)
-        
-    def __getitem__(self, index):
-        img, _ = self.dataset[index]
-        return img, 0
-    
-    def __len__(self):
-        return len(self.dataset)
-
-class Imagenette_OE(torch.utils.data.Dataset):
-    """Outlier exposure wrapper for Imagenette Dataset (fast.ai)"""
-    def __init__(self, root='./data', transform=None, download=True):
-        from torchvision.datasets.utils import download_and_extract_archive
-        from torchvision.datasets import ImageFolder
-        
-        self.url = 'https://s3.amazonaws.com/fast-ai-imageclas/imagenette2.tgz'
-        dataset_dir = os.path.join(root, 'imagenette2')
-        
-        if download and not os.path.exists(dataset_dir):
-            print("Downloading Imagenette from fast.ai...")
-            download_and_extract_archive(self.url, download_root=root, extract_root=root, remove_finished=True)
-            
-        train_dir = os.path.join(dataset_dir, 'train')
-        if not os.path.exists(train_dir):
-            raise RuntimeError(f"Imagenette not found at {train_dir}. Set download=True to download it.")
-            
-        self.dataset = ImageFolder(train_dir, transform=transform)
-
-    def __getitem__(self, index):
-        img, _ = self.dataset[index]
-        return img, 0
-
-    def __len__(self):
-        return len(self.dataset)
 
 class FilteredDataset(Dataset):
     """Helper class to filter and remap labels"""
@@ -179,77 +141,6 @@ class BloodMNIST_OSR(object):
         print(f'BloodMNIST_OSR Train samples: {len(self.train_loader.dataset)}')
         print(f'BloodMNIST_OSR Test samples (known): {len(self.test_loader.dataset)}')
         print(f'BloodMNIST_OSR Test samples (unknown): {len(self.out_loader.dataset)}')
-
-class OCTMnist_OSR(object):
-    def __init__(self, known, unknown, dataroot='./data', use_gpu=True,
-                 num_workers=16, batch_size=128, image_size=224):
-        self.known = known
-        self.unknown = unknown  
-        self.num_classes = len(known)
-        self.image_size = image_size
-
-        print('OCTMnist_OSR Known classes:', self.known)
-        print('OCTMnist_OSR Unknown classes:', self.unknown)
-        print(f'OCTMnist_OSR using native resolution npz with size={self.image_size}')
-
-        # Use native 224x224 MedMNIST files when available. Keep 3-channel grayscale.
-        target_size = (self.image_size, self.image_size)
-        transform = transforms.Compose([
-            transforms.Resize(target_size),
-            transforms.Grayscale(3),
-            transforms.RandomCrop(self.image_size, padding=20),
-            transforms.RandomHorizontalFlip(),
-            transforms.RandomVerticalFlip(),
-            transforms.RandomAffine(degrees=0, translate=(0.05, 0.05), scale=(0.95, 1.05)),
-            #transforms.RandomApply([transforms.RandomRotation(15)], p=0.5),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
-
-        test_transform = transforms.Compose([
-            transforms.Resize(target_size),
-            transforms.Grayscale(3),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-        ])
-
-        train_dataset = OCTMNIST(
-            split='train', transform=transform,
-            download=False, root=dataroot, size=self.image_size
-        )
-        test_dataset = OCTMNIST(
-            split='val', transform=test_transform,
-            download=False, root=dataroot, size=self.image_size
-        )
-
-        train_labels = train_dataset.labels.squeeze()
-        print("OCTMnist_OSR Training set class distribution:", np.bincount(train_labels))
-
-        train_mask = np.isin(train_dataset.labels.squeeze(), self.known)
-        known_test_mask = np.isin(test_dataset.labels.squeeze(), self.known)
-        unknown_test_mask = np.isin(test_dataset.labels.squeeze(), self.unknown)
-
-        self.train_loader = DataLoader(
-            FilteredDataset(train_dataset, train_mask, self.known),
-            batch_size=batch_size, shuffle=True,
-            num_workers=num_workers, pin_memory=use_gpu
-        )
-
-        self.test_loader = DataLoader(
-            FilteredDataset(test_dataset, known_test_mask, self.known),
-            batch_size=batch_size, shuffle=False,
-            num_workers=num_workers, pin_memory=use_gpu
-        )
-
-        self.out_loader = DataLoader(
-            FilteredDataset(test_dataset, unknown_test_mask, self.unknown),
-            batch_size=batch_size, shuffle=False,
-            num_workers=num_workers, pin_memory=use_gpu
-        )
-
-        print(f'OCTMnist_OSR Train samples: {len(self.train_loader.dataset)}')
-        print(f'OCTMnist_OSR Test samples (known): {len(self.test_loader.dataset)}')
-        print(f'OCTMnist_OSR Test samples (unknown): {len(self.out_loader.dataset)}')
 
 
 class DermaMNIST_OSR(object):
