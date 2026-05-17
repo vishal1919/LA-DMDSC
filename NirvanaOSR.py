@@ -22,8 +22,8 @@ from modules.dchs import NirvanaOpenset_loss
 from Networks.models import classifier32
 from Networks.resnet import resnet50, resnet18, resnet34, resnet101, resnet152
 from datasets.osr_dataloader import (
-    Random300K_Images, BloodMNIST_OSR, OCTMnist_OSR,
-    DermaMNIST_OSR, ASC_OSR, breakhis_OSR, DTD_OE, Imagenette_OE
+    Random300K_Images, BloodMNIST_OSR,
+    DermaMNIST_OSR, ASC_OSR, breakhis_OSR
 )
 from utils import Logger, save_networks, load_networks
 from core import test_ddfm_b9, train_Nirvana_oe, train_Nirvana_oe_reg
@@ -53,14 +53,14 @@ parser = argparse.ArgumentParser("Training")
 
 # Dataset
 parser.add_argument('--dataset', type=str, default='bloodmnist',
-                    choices=['bloodmnist', 'octmnist', 'dermamnist', 'asc', 'breakhis_40'],
+                    choices=['bloodmnist', 'dermamnist', 'asc', 'breakhis_40'],
                     help="Dataset selection")
 parser.add_argument('--dataroot', type=str, default='./data')
 parser.add_argument('--outf', type=str, default='./logs_results', help='Directory to save results')
 
 # Optimization
-parser.add_argument('--batch-size', type=int, default=128)
-parser.add_argument('--lr', type=float, default=0.001)
+parser.add_argument('--batch-size', type=int, default=64)
+parser.add_argument('--lr', type=float, default=0.00001)
 parser.add_argument('--max-epoch', type=int, default=100)
 parser.add_argument('--l1-weight', type=float, default=0.0, help='L1 regularization weight')
 parser.add_argument('--l2-weight', type=float, default=1e-4, help='L2 regularization weight (weight decay)')
@@ -69,12 +69,12 @@ parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'rmsprop
 
 # model
 parser.add_argument('--noisy-ratio', type=float, default=0.0, help="noisy ratio for ablation study")
-parser.add_argument('--m-min', type=float, default=38.0, help="margin for hinge")
-parser.add_argument('--m-max', type=float, default=71.0, help="margin for hinge")
+parser.add_argument('--m-min', type=float, default=35.0, help="margin for hinge")
+parser.add_argument('--m-max', type=float, default=55.0, help="margin for hinge")
 parser.add_argument('--Expand', default=100, type=int, metavar='N', help='Expand factor of centers')
 parser.add_argument('--outlier-weight', type=float, default=1.0, help='Weight for outlier triplet loss component')
 parser.add_argument('--inter-weight', type=float, default=1.0, help='Weight for interclass triplet loss component')
-parser.add_argument('--model', type=str, default='classifier32',
+parser.add_argument('--model', type=str, default='resnet50',
                     help='resnet50, classifier32, resnet18, resnet34, resnet101, resnet152')
 parser.add_argument('--loss', type=str, default='NirvanaOpenset')
 parser.add_argument('--pretrained-model', type=str, default=None, help='Path to your fine-tuned model')
@@ -99,13 +99,6 @@ parser.add_argument('--use-attn', action='store_true', default=False,
 
 parser.add_argument('--num-seeds', type=int, default=1,
                     help='How many seeds to run.')
-
-# ASC dataset imbalance settings
-parser.add_argument('--imbalance-ratio', type=int, default=None, choices=[2, 5, 10, 50, 100],
-                    help='Imbalance ratio for ASC training data: None (balanced), 2 (very mild), 5 (mild), 10 (mild), 50 (moderate), 100 (severe)')
-parser.add_argument('--imbalance-seed', type=int, default=42,
-                    help='Random seed for reproducible imbalance creation (ASC only)')
-
 
 def main_worker(options):
     best_acc_avg = 0.0
@@ -137,23 +130,6 @@ def main_worker(options):
         options['img_size'] = 224
         Data = BloodMNIST_OSR(
             known=options['known'],
-            dataroot=options['dataroot'],
-            use_gpu=not options['use_cpu'],
-            batch_size=options['batch_size'],
-            image_size=options['img_size']
-        )
-        trainloader = Data.train_loader
-        testloader = Data.test_loader
-        outloader = Data.out_loader
-
-    elif options['dataset'] == 'octmnist':
-        split_dict = splits[options['dataset']][options['item']]
-        known = split_dict['known']
-        unknown = split_dict['unknown']
-        options['img_size'] = 224
-        Data = OCTMnist_OSR(
-            known=known,
-            unknown=unknown,
             dataroot=options['dataroot'],
             use_gpu=not options['use_cpu'],
             batch_size=options['batch_size'],
@@ -220,7 +196,7 @@ def main_worker(options):
     try:
         background_path = os.path.join(
             os.path.dirname(options['dataroot']),
-            '300K_random_images',
+            'Random300K_Images',
             '300K_random_images.npy'
         )
 
@@ -230,38 +206,25 @@ def main_worker(options):
         if not os.path.exists(background_path):
             raise FileNotFoundError(f"Background dataset not found at {background_path}")
 
-        img_size = 224
-        options['img_size'] = 224
-        
-        oe_transform = tf.Compose([
-            tf.Resize((img_size, img_size)),
-            tf.RandomCrop(img_size, padding=20),
-            tf.RandomHorizontalFlip(),
-            tf.ToTensor()
-        ])
-
-        oe_dataset_type = options.get('oe_dataset', '300k').lower()
-        print(f"Loading outlier exposure dataset: {oe_dataset_type}")
-
-        if oe_dataset_type == 'dtd':
-            oe_data = DTD_OE(
-                root=options['dataroot'],
-                transform=oe_transform,
-                download=True
-            )
-        elif oe_dataset_type == 'imagenette':
-            oe_data = Imagenette_OE(
-                root=options['dataroot'],
-                transform=oe_transform,
-                download=True
-            )
+        if options['dataset'] in ['aod', 'asc', 'breakhis_40']:
+            oe_transform = tf.Compose([
+                tf.Resize((224, 224)),
+                tf.RandomCrop(224, padding=4),
+                tf.RandomHorizontalFlip(),
+                tf.ToTensor()
+            ])
         else:
-            oe_data = Random300K_Images(
-                file_path=background_path,
-                transform=oe_transform,
-                extendable=options['noisy_ratio']
-            )
+            oe_transform = tf.Compose([
+                tf.RandomCrop(32, padding=4),
+                tf.RandomHorizontalFlip(),
+                tf.ToTensor()
+            ])
 
+        oe_data = Random300K_Images(
+            file_path=background_path,
+            transform=oe_transform,
+            extendable=options['noisy_ratio']
+        )
         print(f"Loaded background dataset with {len(oe_data)} images")
 
         g_oe = torch.Generator()
