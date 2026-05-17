@@ -88,7 +88,9 @@ class SelfAttention(nn.Module):
         # --- Attention map ---
         # bmm(Q, K): (B, N, C//8) × (B, C//8, N) → (B, N, N)
         # softmax over last dim → each row sums to 1 (attention weights per position)
-        attention = self.softmax(torch.bmm(query_out, key_out))  # (B, N, N)
+        Cq = query_out.size(-1)  # = in_dim // 8
+        scale = Cq ** 0.5
+        attention = self.softmax(torch.bmm(query_out, key_out) / scale)
 
         # --- Value projection ---
         # Conv: (B, C, H, W) → (B, C, H, W)  view: (B, C, N)
