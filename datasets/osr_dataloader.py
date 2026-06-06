@@ -217,8 +217,37 @@ class DermaMNIST_OSR(object):
     
 class ASC_OSR(object):
     """Open Set Recognition wrapper for Augmented Skin Conditions dataset"""
-    def __init__(self, known, unknown=None, dataroot='./data', use_gpu=True, num_workers=4, batch_size=128):
+    def __init__(self, known, unknown=None, dataroot='./data', use_gpu=True, num_workers=4, batch_size=128,
+                 imbalance_ratio=None, random_state=42):
+        """
+        Parameters:
+        -----------
+        known : list
+            List of known class indices
+        unknown : list, optional
+            List of unknown class indices
+        dataroot : str
+            Path to data directory
+        use_gpu : bool
+            Whether to use GPU
+        num_workers : int
+            Number of workers for DataLoader
+        batch_size : int
+            Batch size for DataLoader
+        imbalance_ratio : int or None
+            None for balanced (default)
+            2 for very mild imbalance (IR=2)
+            5 for mild imbalance (IR=5)
+            10 for mild imbalance (IR=10)
+            50 for moderate imbalance (IR=50)
+            100 for severe imbalance (IR=100)
+        random_state : int
+            Random seed for reproducible imbalance creation
+        """
         self.num_classes = len(known)
+        self.imbalance_ratio = imbalance_ratio
+        self.random_state = random_state
+        
         if isinstance(known, dict):
             self.known = known['known']
         else:
@@ -231,6 +260,9 @@ class ASC_OSR(object):
 
         print('ASC_OSR Known classes:', self.known)
         print('ASC_OSR Unknown classes:', self.unknown)
+        
+        if imbalance_ratio is not None:
+            print(f'ASC_OSR Imbalance mode: IR={imbalance_ratio} (seed={random_state})')
 
         # Define transforms for 224x224 images
         transform = transforms.Compose([
@@ -258,16 +290,41 @@ class ASC_OSR(object):
         
         data = np.load(dataset_path)
         
+        # Apply imbalance to training data if specified
+        train_images = data['train_images']
+        train_labels = data['train_labels']
+        
+        if imbalance_ratio is not None:
+            print(f"\n🔄 Applying IR={imbalance_ratio} imbalance to ASC training set...")
+            print_imbalance_summary(train_labels, dataset_name="ASC Train (Original - Balanced)")
+            
+            # Get imbalanced indices
+            imbalanced_indices = create_imbalanced_indices(
+                train_labels,
+                imbalance_ratio=imbalance_ratio,
+                random_state=random_state
+            )
+            
+            # Apply to training data
+            train_images = train_images[imbalanced_indices]
+            train_labels = train_labels[imbalanced_indices]
+            
+            print_imbalance_summary(train_labels, dataset_name=f"ASC Train (IR={imbalance_ratio})")
+        
         # Create custom dataset classes
         train_dataset = ASCLoader(
-            data['train_images'], data['train_labels'], transform=transform
+            train_images, train_labels, transform=transform
         )
         test_dataset = ASCLoader(
             data['test_images'], data['test_labels'], transform=test_transform
         )
 
-        train_labels = train_dataset.labels.squeeze()
-        print("ASC_OSR Training set class distribution:", np.bincount(train_labels))
+        train_labels_squeeze = train_dataset.labels.squeeze()
+        
+        if imbalance_ratio is None:
+            print("ASC_OSR Training set class distribution (Balanced):", np.bincount(train_labels_squeeze))
+        else:
+            print(f"ASC_OSR Training set class distribution (IR={imbalance_ratio}):", np.bincount(train_labels_squeeze))
 
         # Filter datasets
         train_mask = np.isin(train_dataset.labels.squeeze(), self.known)
