@@ -1,4 +1,4 @@
-# LA-DMDSC: Layered Attention for Open-Set Medical Image Recognition
+# Layered Attention for Open-Set Medical Image Recognition
 
 ## Dataset Setup
 
