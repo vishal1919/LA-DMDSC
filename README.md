@@ -1,5 +1,4 @@
-# LA-DMDSC: Layered Attention Dynamic Margin Deep Simplex Classifier for Open-Set Medical Image Recognition
-This repository contains the implementation code for the paper "LA-DMDSC: Layered Attention Dynamic Margin Deep Simplex Classifier for Open-Set Medical Image Recognition".
+# LA-DMDSC: Layered Attention for Open-Set Medical Image Recognition
 
 ## Dataset Setup
 
