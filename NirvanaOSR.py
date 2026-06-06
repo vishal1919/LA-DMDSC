@@ -19,11 +19,11 @@ import torchvision.transforms as tf
 import numpy as np
 
 from modules.dchs import NirvanaOpenset_loss
-from Networks.models import classifier32, ViTB16, ViTB32
+from Networks.models import classifier32
 from Networks.resnet import resnet50, resnet18, resnet34, resnet101, resnet152
 from osr_dataloader import (
-    Random300K_Images, BloodMNIST_OSR, OCTMnist_OSR,
-    DermaMNIST_OSR, ASC_OSR, breakhis_OSR, DTD_OE, Imagenette_OE
+    Random300K_Images, BloodMNIST_OSR,
+    DermaMNIST_OSR, ASC_OSR, breakhis_OSR
 )
 from utils import Logger, save_networks, load_networks
 from core import test_ddfm_b9, train_Nirvana_oe, train_Nirvana_oe_reg
@@ -54,7 +54,7 @@ parser = argparse.ArgumentParser("Training")
 
 # Dataset
 parser.add_argument('--dataset', type=str, default='bloodmnist',
-                    choices=['bloodmnist', 'octmnist', 'dermamnist', 'asc', 'breakhis_40'],
+                    choices=['bloodmnist', 'dermamnist', 'asc', 'breakhis_40'],
                     help="Dataset selection")
 parser.add_argument('--dataroot', type=str, default='./data')
 parser.add_argument('--outf', type=str, default='./logs_results', help='Directory to save results')
@@ -75,7 +75,7 @@ parser.add_argument('--m-max', type=float, default=71.0, help="margin for hinge"
 parser.add_argument('--Expand', default=100, type=int, metavar='N', help='Expand factor of centers')
 parser.add_argument('--outlier-weight', type=float, default=1.0, help='Weight for outlier triplet loss component')
 parser.add_argument('--inter-weight', type=float, default=1.0, help='Weight for interclass triplet loss component')
-parser.add_argument('--model', type=str, default='classifier32',
+parser.add_argument('--model', type=str, default='resnet50',
                     help='resnet50, classifier32, resnet18, resnet34, resnet101, resnet152, vit_b16, vit_b32')
 parser.add_argument('--loss', type=str, default='NirvanaOpenset')
 parser.add_argument('--pretrained-model', type=str, default=None, help='Path to your fine-tuned model')
@@ -147,23 +147,6 @@ def main_worker(options):
         testloader = Data.test_loader
         outloader = Data.out_loader
 
-    elif options['dataset'] == 'octmnist':
-        split_dict = splits[options['dataset']][options['item']]
-        known = split_dict['known']
-        unknown = split_dict['unknown']
-        options['img_size'] = 224
-        Data = OCTMnist_OSR(
-            known=known,
-            unknown=unknown,
-            dataroot=options['dataroot'],
-            use_gpu=not options['use_cpu'],
-            batch_size=options['batch_size'],
-            image_size=options['img_size']
-        )
-        trainloader = Data.train_loader
-        testloader = Data.test_loader
-        outloader = Data.out_loader
-
     elif options['dataset'] == 'dermamnist':
         split_dict = splits[options['dataset']][options['item']]
         known = split_dict['known']
@@ -215,7 +198,7 @@ def main_worker(options):
         outloader = Data.out_loader
         options['img_size'] = 224
 
-    else:
+else:
         raise ValueError('No dataset chosen or dataset not supported in this script.')
     print("Outlier exposure mode is on.")
     trainloader_oe = None
@@ -223,7 +206,7 @@ def main_worker(options):
     try:
         background_path = os.path.join(
             os.path.dirname(options['dataroot']),
-            '300K_random_images',
+            'Random300K_Images',
             '300K_random_images.npy'
         )
 
@@ -233,38 +216,25 @@ def main_worker(options):
         if not os.path.exists(background_path):
             raise FileNotFoundError(f"Background dataset not found at {background_path}")
 
-        img_size = 224
-        options['img_size'] = 224
-        
-        oe_transform = tf.Compose([
-            tf.Resize((img_size, img_size)),
-            tf.RandomCrop(img_size, padding=20),
-            tf.RandomHorizontalFlip(),
-            tf.ToTensor()
-        ])
-
-        oe_dataset_type = options.get('oe_dataset', '300k').lower()
-        print(f"Loading outlier exposure dataset: {oe_dataset_type}")
-
-        if oe_dataset_type == 'dtd':
-            oe_data = DTD_OE(
-                root=options['dataroot'],
-                transform=oe_transform,
-                download=True
-            )
-        elif oe_dataset_type == 'imagenette':
-            oe_data = Imagenette_OE(
-                root=options['dataroot'],
-                transform=oe_transform,
-                download=True
-            )
+        if options['dataset'] in ['aod', 'asc', 'breakhis_40']:
+            oe_transform = tf.Compose([
+                tf.Resize((224, 224)),
+                tf.RandomCrop(224, padding=4),
+                tf.RandomHorizontalFlip(),
+                tf.ToTensor()
+            ])
         else:
-            oe_data = Random300K_Images(
-                file_path=background_path,
-                transform=oe_transform,
-                extendable=options['noisy_ratio']
-            )
+            oe_transform = tf.Compose([
+                tf.RandomCrop(32, padding=4),
+                tf.RandomHorizontalFlip(),
+                tf.ToTensor()
+            ])
 
+        oe_data = Random300K_Images(
+            file_path=background_path,
+            transform=oe_transform,
+            extendable=options['noisy_ratio']
+        )
         print(f"Loaded background dataset with {len(oe_data)} images")
 
         g_oe = torch.Generator()
@@ -291,7 +261,6 @@ def main_worker(options):
     except Exception as e:
         print(f"Warning: Failed to load background dataset: {str(e)}")
         trainloader_oe = None
-
     options['num_classes'] = Data.num_classes
 
     print("Creating model: {}".format(options['model']))
