@@ -19,15 +19,16 @@ import torchvision.transforms as tf
 import numpy as np
 
 from modules.dchs import NirvanaOpenset_loss
-from Networks.models import classifier32
+from Networks.models import classifier32, ViTB16, ViTB32
 from Networks.resnet import resnet50, resnet18, resnet34, resnet101, resnet152
-from datasets.osr_dataloader import (
-    Random300K_Images, BloodMNIST_OSR,
-    DermaMNIST_OSR, ASC_OSR, breakhis_OSR
+from osr_dataloader import (
+    Random300K_Images, BloodMNIST_OSR, OCTMnist_OSR,
+    DermaMNIST_OSR, ASC_OSR, breakhis_OSR, DTD_OE, Imagenette_OE
 )
 from utils import Logger, save_networks, load_networks
 from core import test_ddfm_b9, train_Nirvana_oe, train_Nirvana_oe_reg
 from split import splits_2020 as splits
+from distance_metrics import simplex_distance_metrics_from_loader
 
 def seed_everything(seed: int):
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -53,14 +54,14 @@ parser = argparse.ArgumentParser("Training")
 
 # Dataset
 parser.add_argument('--dataset', type=str, default='bloodmnist',
-                    choices=['bloodmnist', 'dermamnist', 'asc', 'breakhis_40'],
+                    choices=['bloodmnist', 'octmnist', 'dermamnist', 'asc', 'breakhis_40'],
                     help="Dataset selection")
 parser.add_argument('--dataroot', type=str, default='./data')
 parser.add_argument('--outf', type=str, default='./logs_results', help='Directory to save results')
 
 # Optimization
-parser.add_argument('--batch-size', type=int, default=64)
-parser.add_argument('--lr', type=float, default=0.00001)
+parser.add_argument('--batch-size', type=int, default=128)
+parser.add_argument('--lr', type=float, default=0.001)
 parser.add_argument('--max-epoch', type=int, default=100)
 parser.add_argument('--l1-weight', type=float, default=0.0, help='L1 regularization weight')
 parser.add_argument('--l2-weight', type=float, default=1e-4, help='L2 regularization weight (weight decay)')
@@ -69,13 +70,13 @@ parser.add_argument('--optim', type=str, default='sgd', choices=['sgd', 'rmsprop
 
 # model
 parser.add_argument('--noisy-ratio', type=float, default=0.0, help="noisy ratio for ablation study")
-parser.add_argument('--m-min', type=float, default=35.0, help="margin for hinge")
-parser.add_argument('--m-max', type=float, default=55.0, help="margin for hinge")
+parser.add_argument('--m-min', type=float, default=38.0, help="margin for hinge")
+parser.add_argument('--m-max', type=float, default=71.0, help="margin for hinge")
 parser.add_argument('--Expand', default=100, type=int, metavar='N', help='Expand factor of centers')
 parser.add_argument('--outlier-weight', type=float, default=1.0, help='Weight for outlier triplet loss component')
 parser.add_argument('--inter-weight', type=float, default=1.0, help='Weight for interclass triplet loss component')
-parser.add_argument('--model', type=str, default='resnet50',
-                    help='resnet50, classifier32, resnet18, resnet34, resnet101, resnet152')
+parser.add_argument('--model', type=str, default='classifier32',
+                    help='resnet50, classifier32, resnet18, resnet34, resnet101, resnet152, vit_b16, vit_b32')
 parser.add_argument('--loss', type=str, default='NirvanaOpenset')
 parser.add_argument('--pretrained-model', type=str, default=None, help='Path to your fine-tuned model')
 
@@ -99,6 +100,13 @@ parser.add_argument('--use-attn', action='store_true', default=False,
 
 parser.add_argument('--num-seeds', type=int, default=1,
                     help='How many seeds to run.')
+
+# ASC dataset imbalance settings
+parser.add_argument('--imbalance-ratio', type=int, default=None, choices=[2, 5, 10, 50, 100],
+                    help='Imbalance ratio for ASC training data: None (balanced), 2 (very mild), 5 (mild), 10 (mild), 50 (moderate), 100 (severe)')
+parser.add_argument('--imbalance-seed', type=int, default=42,
+                    help='Random seed for reproducible imbalance creation (ASC only)')
+
 
 def main_worker(options):
     best_acc_avg = 0.0
@@ -139,6 +147,23 @@ def main_worker(options):
         testloader = Data.test_loader
         outloader = Data.out_loader
 
+    elif options['dataset'] == 'octmnist':
+        split_dict = splits[options['dataset']][options['item']]
+        known = split_dict['known']
+        unknown = split_dict['unknown']
+        options['img_size'] = 224
+        Data = OCTMnist_OSR(
+            known=known,
+            unknown=unknown,
+            dataroot=options['dataroot'],
+            use_gpu=not options['use_cpu'],
+            batch_size=options['batch_size'],
+            image_size=options['img_size']
+        )
+        trainloader = Data.train_loader
+        testloader = Data.test_loader
+        outloader = Data.out_loader
+
     elif options['dataset'] == 'dermamnist':
         split_dict = splits[options['dataset']][options['item']]
         known = split_dict['known']
@@ -165,7 +190,9 @@ def main_worker(options):
             unknown=unknown,
             dataroot=options['dataroot'],
             use_gpu=not options['use_cpu'],
-            batch_size=options['batch_size']
+            batch_size=options['batch_size'],
+            imbalance_ratio=options.get('imbalance_ratio'),
+            random_state=options.get('imbalance_seed', 42)
         )
         trainloader = Data.train_loader
         testloader = Data.test_loader
@@ -196,7 +223,7 @@ def main_worker(options):
     try:
         background_path = os.path.join(
             os.path.dirname(options['dataroot']),
-            'Random300K_Images',
+            '300K_random_images',
             '300K_random_images.npy'
         )
 
@@ -206,25 +233,38 @@ def main_worker(options):
         if not os.path.exists(background_path):
             raise FileNotFoundError(f"Background dataset not found at {background_path}")
 
-        if options['dataset'] in ['aod', 'asc', 'breakhis_40']:
-            oe_transform = tf.Compose([
-                tf.Resize((224, 224)),
-                tf.RandomCrop(224, padding=4),
-                tf.RandomHorizontalFlip(),
-                tf.ToTensor()
-            ])
-        else:
-            oe_transform = tf.Compose([
-                tf.RandomCrop(32, padding=4),
-                tf.RandomHorizontalFlip(),
-                tf.ToTensor()
-            ])
+        img_size = 224
+        options['img_size'] = 224
+        
+        oe_transform = tf.Compose([
+            tf.Resize((img_size, img_size)),
+            tf.RandomCrop(img_size, padding=20),
+            tf.RandomHorizontalFlip(),
+            tf.ToTensor()
+        ])
 
-        oe_data = Random300K_Images(
-            file_path=background_path,
-            transform=oe_transform,
-            extendable=options['noisy_ratio']
-        )
+        oe_dataset_type = options.get('oe_dataset', '300k').lower()
+        print(f"Loading outlier exposure dataset: {oe_dataset_type}")
+
+        if oe_dataset_type == 'dtd':
+            oe_data = DTD_OE(
+                root=options['dataroot'],
+                transform=oe_transform,
+                download=True
+            )
+        elif oe_dataset_type == 'imagenette':
+            oe_data = Imagenette_OE(
+                root=options['dataroot'],
+                transform=oe_transform,
+                download=True
+            )
+        else:
+            oe_data = Random300K_Images(
+                file_path=background_path,
+                transform=oe_transform,
+                extendable=options['noisy_ratio']
+            )
+
         print(f"Loaded background dataset with {len(oe_data)} images")
 
         g_oe = torch.Generator()
@@ -255,6 +295,15 @@ def main_worker(options):
     options['num_classes'] = Data.num_classes
 
     print("Creating model: {}".format(options['model']))
+    
+    # Check for incompatible flags with ViT models
+    if options['model'] in ['vit_b16', 'vit_b32'] and options.get('use_attn', False):
+        raise ValueError(
+            f"Error: --use-attn flag is not compatible with {options['model']} models. "
+            "Vision Transformers already use self-attention mechanisms. "
+            "Please omit the --use-attn flag when using ViT models."
+        )
+    
     if options['model'] == 'classifier32':
         net = classifier32(num_classes=options['num_classes'])
         feat_dim = 128
@@ -272,6 +321,12 @@ def main_worker(options):
         feat_dim = net.feat_dim
     elif options['model'] == 'resnet152':
         net = resnet152(pretrained=True, num_classes=options['num_classes'], use_attn=options.get('use_attn', False), img_size=options.get('img_size', 224))
+        feat_dim = net.feat_dim
+    elif options['model'] == 'vit_b16':
+        net = ViTB16(num_classes=options['num_classes'], pretrained=True, img_size=options.get('img_size', 224))
+        feat_dim = net.feat_dim
+    elif options['model'] == 'vit_b32':
+        net = ViTB32(num_classes=options['num_classes'], pretrained=True, img_size=options.get('img_size', 224))
         feat_dim = net.feat_dim
     else:
         raise ValueError('Model not supported in this file.')
@@ -311,10 +366,14 @@ def main_worker(options):
     if options['eval']:
         net, criterion = load_networks(net, model_path, file_name, criterion=criterion)
         results, results_b9 = test_ddfm_b9(net, criterion, testloader, outloader, epoch=0, **options)
+        variance_stats = simplex_distance_metrics_from_loader(
+            net, testloader, options['known'], device, centers=criterion.centers
+        )
+        variance_stats["intraclass_num_classes"] = len(options['known'])
         print("Acc (%): {:.3f}\t AUROC (%): {:.3f}\t OSCR (%): {:.3f}\t".format(
             results['ACC'], results['AUROC'], results['OSCR']
         ))
-        return results, results_b9
+        return results, results_b9, variance_stats  
 
     # Optimizer
     l2_weight = options['l2_weight']
@@ -405,7 +464,19 @@ def main_worker(options):
     elapsed = str(datetime.timedelta(seconds=elapsed))
     print("Finished. Total elapsed time (h:m:s): {}".format(elapsed))
 
-    return results_best, results_b9_best
+    variance_net = net
+    if results_best:
+        try:
+            variance_net, _ = load_networks(net, model_path, file_name, loss='best')
+        except Exception as e:
+            print(f"Warning: Failed to load best checkpoint for variance: {str(e)}")
+            variance_net = net
+
+    variance_stats = simplex_distance_metrics_from_loader(
+        variance_net, testloader, options['known'], device, centers=criterion.centers
+    )
+    variance_stats["intraclass_num_classes"] = len(options['known'])
+    return results_best, results_b9_best, variance_stats
 
 
 if __name__ == '__main__':
@@ -424,6 +495,7 @@ if __name__ == '__main__':
 
     all_results = {}
     all_results_b9 = {}
+    all_metrics_b9 = {}
 
     for seed in SEEDS:
         print(f"\n==============================")
@@ -434,6 +506,7 @@ if __name__ == '__main__':
 
         results = dict()
         results_b9 = dict()
+        metrics_b9 = dict()
 
         for i in range(len(splits[options['dataset']])):
             split_dict = splits[options['dataset']][i]
@@ -444,7 +517,7 @@ if __name__ == '__main__':
                 'item': i,
                 'known': known,
                 'unknown': unknown,
-                'img_size': 32
+                'img_size': 224
             })
 
             dir_name = '{}_{}_{}_{}_{}_{}_seed{}'.format(
@@ -456,8 +529,9 @@ if __name__ == '__main__':
 
             file_name = options['dataset'] + '.csv'
             file_name_b9 = options['dataset'] + '_b9.csv'
+            file_name_metrics_b9 = options['dataset'] + '_metrics_b9.csv'
 
-            res, res_b9 = main_worker(options)
+            res, res_b9, metrics = main_worker(options)
 
             res['unknown'] = unknown
             res['known'] = known
@@ -467,14 +541,26 @@ if __name__ == '__main__':
             res_b9['known'] = known
             res_b9['seed'] = seed
 
+            metric_res_b9 = dict(metrics)
+            metric_res_b9['ACC'] = res_b9.get('ACC')
+            metric_res_b9['AUROC'] = res_b9.get('AUROC')
+            metric_res_b9['OSCR'] = res_b9.get('OSCR')
+            metric_res_b9['unknown'] = unknown
+            metric_res_b9['known'] = known
+            metric_res_b9['seed'] = seed
+
             results[str(i)] = res
             pd.DataFrame(results).to_csv(os.path.join(dir_path, file_name))
 
             results_b9[str(i)] = res_b9
             pd.DataFrame(results_b9).to_csv(os.path.join(dir_path, file_name_b9))
 
+            metrics_b9[str(i)] = metric_res_b9
+            pd.DataFrame(metrics_b9).to_csv(os.path.join(dir_path, file_name_metrics_b9))
+
         all_results[str(seed)] = results
         all_results_b9[str(seed)] = results_b9
+        all_metrics_b9[str(seed)] = metrics_b9
 
     def per_seed_means(all_res, key):
         """
