@@ -1,4 +1,4 @@
-# Layered Attention for Open-Set Medical Image Recognition
+# LA-DMDSC: Dynamic Margin Deep Simplex Classifier with Layered Attention for Open-Set Medical Image Recognition
 
 ## Dataset Setup
 
